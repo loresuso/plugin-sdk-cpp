@@ -56,6 +56,42 @@ typedef enum ss_plugin_schema_type
 	SS_PLUGIN_SCHEMA_JSON = 1,
 } ss_plugin_schema_type;
 
+// todo(jasondellaluce): add docs
+typedef struct ss_plugin_plugin_event
+{
+	const uint8_t *data;
+	uint32_t datalen;
+	uint64_t ts;
+} ss_plugin_plugin_event;
+
+// todo(jasondellaluce): add docs
+// todo(jasondellaluce): this should be kept in sync with the never-changin
+// one of libscap, so we either need to document this or share it in a common
+// header
+#if defined _MSC_VER
+#pragma pack(push)
+#pragma pack(1)
+#elif defined __sun
+#pragma pack(1)
+#else
+#pragma pack(push, 1)
+#endif
+typedef struct ss_plugin_syscall_event {
+#ifdef PPM_ENABLE_SENTINEL
+	uint32_t sentinel_begin;
+#endif
+	uint64_t ts; /* timestamp, in nanoseconds from epoch */
+	uint64_t tid; /* the tid of the thread that generated this event */
+	uint32_t len; /* the event len, including the header */
+	uint16_t type; /* the event type */
+	uint32_t nparams; /* the number of parameters of the event */
+} ss_plugin_syscall_event;
+#if defined __sun
+#pragma pack()
+#else
+#pragma pack(pop)
+#endif
+
 // This struct represents an event returned by the plugin, and is used
 // below in next_batch().
 // - evtnum: incremented for each event returned. Might not be contiguous.
@@ -73,10 +109,29 @@ typedef enum ss_plugin_schema_type
 typedef struct ss_plugin_event
 {
 	uint64_t evtnum;
-	const uint8_t *data;
-	uint32_t datalen;
-	uint64_t ts;
+	union
+	{
+		ss_plugin_plugin_event plugin;
+		// todo(jasondellaluce): figure out if we can make this a non-pointer.
+		// the answer is probably no due to the fields being appended to the
+		// scap header and thus the struct size not being predictable at compile
+		// time
+		ss_plugin_syscall_event* syscall;
+	};
+	// todo(jasondellaluce): consider adding the event source (index and string)
+	// here instead of in ss_plugin_extract_field, so that it's available for
+	// state parsing as well
 } ss_plugin_event;
+
+
+// todo(jasondellaluce): add docs here
+typedef struct ss_plugin_state_event
+{
+	uint32_t code;
+	const char* name;
+	uint32_t datalen;
+	const uint8_t *data;
+} ss_plugin_state_event;
 
 // Used in extract_fields functions below to receive a field/arg
 // pair and return an extracted value.
@@ -139,6 +194,7 @@ typedef struct ss_plugin_extract_field
 	bool arg_present;
 	uint32_t ftype;
 	bool flist;
+	const char* source;
 } ss_plugin_extract_field;
 
 //
@@ -159,6 +215,55 @@ typedef void ss_plugin_t;
 // and it treats is as opaque.
 //
 typedef void ss_instance_t;
+
+// --- STATE STUFF todo(jasondellaluce): clear up docs for this part
+
+// Opaque a pointer to the owner of a plugin. It can be used to invert the
+// control and invoke functions of the owner from within the plugin.
+typedef void ss_plugin_owner_t;
+
+// Opaque a pointer to a state table
+typedef void ss_plugin_table_t;
+
+// Opaque a pointer to an entry of a state table
+typedef void ss_plugin_table_entry_t;
+
+// Opaque a accessor to a field of a state table, which can be used
+// on any entry of that table
+typedef void ss_plugin_table_field_t;
+
+// Types supported by entry fields of state tables
+// todo(jasondellaluce): support all types defined in libsinsp
+typedef enum ss_plugin_table_type
+{
+	INT64,
+    UINT64,
+    STRING,
+	STRUCT,
+} ss_plugin_table_type;
+
+// Data representation of entry fields of state tables
+typedef union ss_plugin_table_data
+{
+	int64_t s64;
+    uint64_t u64;
+    const char* str;
+} ss_plugin_table_data;
+
+// Info about a state table
+typedef struct ss_plugin_table_info
+{
+    const char* name;
+    ss_plugin_table_type key_type;
+} ss_plugin_table_info;
+
+// Info about a field of entries of a state table
+typedef struct ss_plugin_table_fieldinfo
+{
+    const char* name;
+    ss_plugin_table_type field_type;
+	// todo(jasondellaluce): bool read_only;
+} ss_plugin_table_fieldinfo;
 
 #ifdef __cplusplus
 }

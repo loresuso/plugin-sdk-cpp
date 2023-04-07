@@ -28,7 +28,7 @@ extern "C" {
 // API versions of this plugin framework
 //
 #define PLUGIN_API_VERSION_MAJOR 2
-#define PLUGIN_API_VERSION_MINOR 0
+#define PLUGIN_API_VERSION_MINOR 1
 #define PLUGIN_API_VERSION_PATCH 0
 
 //
@@ -38,6 +38,83 @@ extern "C" {
 #define EXPAND_AND_QUOTE(str)       QUOTE(str)
 #define PLUGIN_API_VERSION          PLUGIN_API_VERSION_MAJOR.PLUGIN_API_VERSION_MINOR.PLUGIN_API_VERSION_PATCH
 #define PLUGIN_API_VERSION_STR      EXPAND_AND_QUOTE(PLUGIN_API_VERSION)
+
+
+// --- STATE STUFF todo(jasondellaluce): clear up docs for this part
+
+// todo(jasondellaluce): consistent error handling in all the vtables below
+
+// Vtable for controlling fields of entries of a state table
+typedef struct
+{
+	ss_plugin_table_fieldinfo* (*list_fields)(ss_plugin_table_t* t, uint32_t* nfields);
+    ss_plugin_table_field_t* (*get_field)(ss_plugin_table_t* t, const char* name, ss_plugin_table_type data_type);
+	// todo(jasondellaluce): add_field should be able to fail for non-dynamic struct types
+    ss_plugin_table_field_t* (*add_field)(ss_plugin_table_t* t, const char* name, ss_plugin_table_type data_type);
+
+	// todo(jasondellaluce): future developments below (needed for file descriptors)
+	// will also need to support ss_plugin_table_entry_t as a new ss_plugin_table_data type.
+	// read/write operation will need to return an entry as their output
+	// todo(jasondellaluce): subfields work for structs, but what about array types?
+	//
+	// ss_plugin_table_fieldinfo* (*list_subfields)(ss_plugin_table_t* t, ss_plugin_table_fieldinfo* f, uint32_t* nfields);
+	// ss_plugin_table_field_t* (*get_subfield)(ss_plugin_table_t* t, ss_plugin_table_field_t* f, const char* name, ss_plugin_table_type data_type);
+	// ss_plugin_table_field_t* (*add_subfield)(ss_plugin_table_t* t, ss_plugin_table_field_t* f, const char* name, ss_plugin_table_type data_type);
+}
+plugin_table_field_api;
+
+// todo(jasondellaluce): support reading last error of the owner
+
+// Vtable for controlling a state table in read mode
+typedef struct
+{
+    const char*	(*get_name)(ss_plugin_table_t* t);
+    uint32_t (*get_size)(ss_plugin_table_t* t); // todo(jasondellaluce): uint64?
+    ss_plugin_table_entry_t* (*get_entry)(ss_plugin_table_t* t, const ss_plugin_table_data* key);
+    bool (*foreach_entry)(ss_plugin_table_t* t, bool (*iterator)(ss_plugin_table_entry_t*)); // todo(jasondellaluce): remove this
+    void (*read_entry_field)(ss_plugin_table_t* t, ss_plugin_table_entry_t* e, const ss_plugin_table_field_t* f, ss_plugin_table_data* out);
+}
+plugin_table_read_api;
+
+// Vtable for controlling a state table in write mode
+typedef struct
+{
+    void (*clear)(ss_plugin_table_t* t);
+    bool (*erase_entry)(ss_plugin_table_t* t, const ss_plugin_table_data* key);
+    ss_plugin_table_entry_t* (*create_entry)(ss_plugin_table_t* t);
+    ss_plugin_table_entry_t* (*add_entry)(ss_plugin_table_t* t, const ss_plugin_table_data* key, ss_plugin_table_entry_t* entry);
+    void (*write_entry_field)(ss_plugin_table_t* t, ss_plugin_table_entry_t* e, const ss_plugin_table_field_t* f, const ss_plugin_table_data* in);
+}
+plugin_table_write_api;
+
+typedef struct
+{
+	const char* name;
+	ss_plugin_table_t* table;
+	ss_plugin_table_type key_type;
+	plugin_table_field_api field_api;
+	plugin_table_read_api read_api;
+	plugin_table_write_api write_api;
+}
+plugin_table_input;
+
+// Vtable for controlling a state table at initialization time
+typedef struct
+{
+    ss_plugin_table_info* (*list_tables)(ss_plugin_owner_t* o, uint32_t* ntables);
+    ss_plugin_table_t* (*get_table)(ss_plugin_owner_t* o, const char* name, ss_plugin_table_type key_type);
+    void (*add_table)(ss_plugin_owner_t* o, plugin_table_input* input);
+
+	plugin_table_field_api field_api;
+	plugin_table_read_api read_api; // todo(jasondellaluce): remove this, debug purposes only
+	plugin_table_write_api write_api; // todo(jasondellaluce): remove this, debug purposes only
+}
+plugin_table_init_api;
+
+typedef void (*plugin_state_event_func)(ss_plugin_owner_t* o, const ss_plugin_state_event *evt);
+
+// --- END OF STATE STUFF todo(jasondellaluce): clear up docs for this part
+
 
 //
 // The struct below define the functions and arguments for plugins capabilities:
@@ -118,7 +195,7 @@ typedef struct
 	// If a non-NULL ss_plugin_t* state is returned, then subsequent invocations
 	// of init() must not return the same ss_plugin_t* value again, if not after
 	// it has been disposed with destroy() first.
-	ss_plugin_t *(*init)(const char *config, ss_plugin_rc *rc);
+	ss_plugin_t *(*init)(const char *config, ss_plugin_rc *rc, ss_plugin_owner_t* owner, const plugin_table_init_api* table_init);
 
 	//
 	// Destroy the plugin and, if plugin state was allocated, free it.
@@ -191,6 +268,12 @@ typedef struct
 		// Example event sources would be strings like "aws_cloudtrail",
 		// "k8s_audit", etc. The source can be used by plugins with event
 		// sourcing capabilities to filter the events they receive.
+		// 
+		// If the plugin's event source is different than "syscall", then
+		// it will only produce events of type PPME_PLUGINEVENT_E (following
+		// the libscap type enumerative). If the plugin's event source is
+		// than "syscall", then it will only produce events of any of the types
+		// support by libscap.
 		//
 		const char* (*get_event_source)();
 
@@ -288,6 +371,10 @@ typedef struct
 		// If the returned pointer is non-NULL, then it must be uniquely
 		// attached to the ss_plugin_t* parameter value. The pointer must not
 		// be shared across multiple distinct ss_plugin_t* values.
+		//
+		// If the plugin's event source is different than "syscall", then the
+		// event's data is encoded with the "extra" union scheme, otherwise
+		// it will be encoded with the "syscall" union scheme.
 		const char* (*event_to_string)(ss_plugin_t *s, const ss_plugin_event *evt);
 
 		//
@@ -307,12 +394,20 @@ typedef struct
 		// The value of the ss_plugin_event** output parameter must be uniquely
 		// attached to the ss_instance_t* parameter value. The pointer must not
 		// be shared across multiple distinct ss_instance_t* values.
+		//
+		// If the plugin's event source is different than "syscall", then the
+		// event's data is encoded with the "extra" union scheme, otherwise
+		// it will be encoded with the "syscall" union scheme.
 		ss_plugin_rc (*next_batch)(ss_plugin_t* s, ss_instance_t* h, uint32_t *nevts, ss_plugin_event **evts);
 	};
 
 	// Field extraction capability API
 	struct
 	{
+		// todo(jasondellaluce): write documentation for this
+		// Required: no
+		uint16_t* (*get_extract_event_types)(uint32_t* num_types);
+
 		//
 		// Return a string describing the event sources that this
 		// plugin can consume.
@@ -381,7 +476,40 @@ typedef struct
 		// The value of the ss_plugin_extract_field* output parameter must be
 		// uniquely attached to the ss_plugin_t* parameter value. The pointer
 		// must not be shared across multiple distinct ss_plugin_t* values.
-		ss_plugin_rc (*extract_fields)(ss_plugin_t *s, const ss_plugin_event *evt, uint32_t num_fields, ss_plugin_extract_field *fields);
+		//
+		// If the plugin's event source is different than "syscall", then the
+		// event's data is encoded with the "extra" union scheme, otherwise
+		// it will be encoded with the "syscall" union scheme.
+		ss_plugin_rc (*extract_fields)(ss_plugin_t *s, const ss_plugin_event *evt, uint32_t num_fields, ss_plugin_extract_field *fields, const plugin_table_read_api* table_read);
+	};
+
+	// State management capability API
+	struct
+	{
+		// todo(jasondellaluce): write documentation for this
+		// todo(jasondellaluce): if there is no use case for being compatible
+		// with some event sources for a capability only, maybe this would
+		// need to be merged with get_extract_event_types
+		// Required: no
+		uint16_t* (*get_parse_event_types)(uint32_t* num_types);
+
+		// todo(jasondellaluce): write documentation for this
+		// todo(jasondellaluce): if there is no use case for being compatible
+		// with some event sources for a capability only, maybe this would
+		// need to be merged with get_extract_event_sources
+		// Required: no
+		const char* (*get_parse_event_sources)();
+		//
+		// todo(jasondellaluce): write documentation for this
+		// note: this is thread safe and can be invoked asynchronously
+		// the event memory is owned by the plugin
+		// Required_no
+		ss_plugin_rc (*init_state_events)(ss_plugin_t *s, ss_plugin_owner_t* owner, plugin_state_event_func push_evt);
+		//
+		// todo(jasondellaluce): write documentation for this
+		// todo(jasondellaluce): think about adding a pub-sub mechanism to advise listeners
+		// of interesting state changes
+		ss_plugin_rc (*parse_event)(ss_plugin_t *s, const ss_plugin_event *evt, const plugin_table_read_api* table_read, const plugin_table_write_api* table_write);
 	};
 } plugin_api;
 
